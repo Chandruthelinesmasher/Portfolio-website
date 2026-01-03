@@ -75,12 +75,91 @@ jobs:
         run: echo "tag=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
 
 # =======================================================
+# JOB 2.5: Setup Terraform Backend Storage
+# =======================================================
+  setup-backend:
+    name: 🗄️ Setup Terraform Backend
+    runs-on: ubuntu-latest
+    needs: build-test
+    outputs:
+      storage_account_name: ${{ steps.backend.outputs.storage_account_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Terraform Backend Storage
+        id: backend
+        run: |
+          RESOURCE_GROUP="${{ env.BACKEND_RG }}"
+          LOCATION="${{ env.TF_VAR_LOCATION }}"
+          # Generate unique storage account name (3-24 chars, lowercase, numbers only)
+          STORAGE_ACCOUNT="tfstate$(echo ${{ github.repository }} | sed 's/[^a-z0-9]//g' | cut -c1-10)$(date +%s | tail -c 6)"
+          CONTAINER_NAME="tfstate"
+          
+          echo "🔧 Creating backend infrastructure..."
+          
+          # Create resource group if it doesn't exist
+          echo "Creating resource group: $RESOURCE_GROUP"
+          az group create \
+            --name "$RESOURCE_GROUP" \
+            --location "$LOCATION" \
+            --output none || true
+          
+          # Check if storage account exists
+          EXISTING=$(az storage account list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?starts_with(name, 'tfstate')].name" \
+            -o tsv | head -n 1)
+          
+          if [ -z "$EXISTING" ]; then
+            echo "✨ Creating new storage account: $STORAGE_ACCOUNT"
+            az storage account create \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$STORAGE_ACCOUNT" \
+              --sku Standard_LRS \
+              --encryption-services blob \
+              --min-tls-version TLS1_2 \
+              --allow-blob-public-access false \
+              --output none
+            
+            STORAGE_ACCOUNT_FINAL="$STORAGE_ACCOUNT"
+          else
+            echo "♻️  Using existing storage account: $EXISTING"
+            STORAGE_ACCOUNT_FINAL="$EXISTING"
+          fi
+          
+          # Get storage account key
+          ACCOUNT_KEY=$(az storage account keys list \
+            --resource-group "$RESOURCE_GROUP" \
+            --account-name "$STORAGE_ACCOUNT_FINAL" \
+            --query '[0].value' -o tsv)
+          
+          # Create blob container if it doesn't exist
+          echo "Creating container: $CONTAINER_NAME"
+          az storage container create \
+            --name "$CONTAINER_NAME" \
+            --account-name "$STORAGE_ACCOUNT_FINAL" \
+            --account-key "$ACCOUNT_KEY" \
+            --output none || true
+          
+          echo "✅ Backend setup complete!"
+          echo "📦 Storage Account: $STORAGE_ACCOUNT_FINAL"
+          echo "📁 Container: $CONTAINER_NAME"
+          
+          # Output for next job
+          echo "storage_account_name=$STORAGE_ACCOUNT_FINAL" >> $GITHUB_OUTPUT
+
+# =======================================================
 # JOB 3: Terraform – Azure Infra
 # =======================================================
   terraform-deploy:
     name: 🏗️ Terraform Azure Infra
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, setup-backend]
     outputs:
       acr_name: ${{ steps.tf_outputs.outputs.acr_name }}
       acr_login_server: ${{ steps.tf_outputs.outputs.acr_login_server }}
@@ -102,7 +181,11 @@ jobs:
       - name: Terraform Init
         run: |
           cd terraform
-          terraform init
+          terraform init \
+            -backend-config="resource_group_name=${{ env.BACKEND_RG }}" \
+            -backend-config="storage_account_name=${{ needs.setup-backend.outputs.storage_account_name }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=portfolio.terraform.tfstate"
 
       - name: Terraform Plan
         run: |
@@ -216,7 +299,7 @@ jobs:
   notify:
     name: 📊 Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [code-quality, build-test, terraform-deploy, docker-build-push, deploy-to-aks]
+    needs: [code-quality, build-test, setup-backend, terraform-deploy, docker-build-push, deploy-to-aks]
     if: always()
 
     steps:
@@ -226,6 +309,7 @@ jobs:
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Code Quality | ${{ needs.code-quality.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Build & Test | ${{ needs.build-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend Setup | ${{ needs.setup-backend.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Terraform | ${{ needs.terraform-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Docker | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| AKS Deploy | ${{ needs.deploy-to-aks.result }} |" >> $GITHUB_STEP_SUMMARY
