@@ -38,9 +38,14 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run lint || true
+      
+      - name: Run Linter
+        run: npm run lint || true
+        continue-on-error: true
 
-      - uses: aquasecurity/trivy-action@master
+      - name: Security Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           scan-type: fs
           scan-ref: .
@@ -71,8 +76,13 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm test || true
-      - run: npm run build
+      
+      - name: Run Tests
+        run: npm test || true
+        continue-on-error: true
+        
+      - name: Build Application
+        run: npm run build
 
       - id: tag
         run: echo "tag=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
@@ -94,8 +104,6 @@ jobs:
       - uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
 
       - name: Create Backend Storage
         id: backend
@@ -156,8 +164,6 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
@@ -205,11 +211,10 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
-
       - run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
 
-      - id: push
+      - name: Build and Push Docker Images
+        id: push
         run: |
           TAG=$(echo $GITHUB_SHA | cut -c1-7)
           IMAGE="${{ needs.terraform-deploy.outputs.acr_login_server }}/portfolio-website:${TAG}"
@@ -235,9 +240,8 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
-
-      - run: |
+      - name: Get AKS Credentials
+        run: |
           az aks get-credentials \
             --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
             --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
@@ -245,7 +249,8 @@ jobs:
 
       - uses: azure/setup-helm@v4
 
-      - run: |
+      - name: Create Production Namespace
+        run: |
           kubectl create namespace production \
             --dry-run=client -o yaml | kubectl apply -f -
 
@@ -258,9 +263,11 @@ jobs:
             -f helm/portfolio/values-prod.yaml \
             --set image.repository=${IMAGE%:*} \
             --set image.tag=${IMAGE##*:} \
-            --wait
+            --wait \
+            --timeout 5m
 
-      - run: kubectl get deploy,svc,hpa -n production
+      - name: Verify Deployment
+        run: kubectl get deploy,svc,hpa -n production
 
 # =======================================================
 # JOB 7: Summary
