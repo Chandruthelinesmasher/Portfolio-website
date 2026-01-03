@@ -89,7 +89,16 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
+
+      - name: Debug Azure Subscription
+        run: |
+          echo "=== Current Subscription Info ==="
+          az account show
+          echo "=== Subscription ID ==="
+          az account show --query id -o tsv
+          echo "=== All Available Subscriptions ==="
+          az account list --output table
 
       - name: Create Terraform Backend Storage
         id: backend
@@ -171,7 +180,7 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -221,7 +230,7 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
 
       - name: Login to ACR
         run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
@@ -251,7 +260,7 @@ jobs:
 
       - uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
 
       - name: Get AKS Credentials
         run: |
