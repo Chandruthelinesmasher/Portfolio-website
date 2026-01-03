@@ -128,12 +128,28 @@ jobs:
           
           echo "🔧 Creating backend infrastructure..."
           
+          # Verify we can access the subscription
+          echo "Verifying subscription access..."
+          CURRENT_SUB=$(az account show --query id -o tsv)
+          echo "Current subscription: $CURRENT_SUB"
+          
+          # Try to list resource groups to verify permissions
+          echo "Testing permissions by listing resource groups..."
+          az group list --query "[].{name:name, location:location}" -o table || {
+            echo "❌ Failed to list resource groups. Checking permissions..."
+            az role assignment list --assignee $(az account show --query user.name -o tsv) --all -o table
+            exit 1
+          }
+          
           # Create resource group if it doesn't exist
           echo "Creating resource group: $RESOURCE_GROUP"
           az group create \
             --name "$RESOURCE_GROUP" \
             --location "$LOCATION" \
-            --output none || true
+            --output json || {
+              echo "❌ Failed to create resource group. Error details above."
+              exit 1
+            }
           
           # Check if storage account exists
           EXISTING=$(az storage account list \
