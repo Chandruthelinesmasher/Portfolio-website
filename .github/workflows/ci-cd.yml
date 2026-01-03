@@ -19,7 +19,7 @@ env:
   TF_VAR_PROJECT_NAME: 'devops-portfolio'
   TF_VAR_ENVIRONMENT: 'prod'
   TF_VAR_LOCATION: 'eastus'
-  SUBSCRIPTION_ID: f26d88f1-e6f7-4017-8f8f-01be78d4e113
+  SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 # =======================================================
 # JOB 1: Code Quality & Security
