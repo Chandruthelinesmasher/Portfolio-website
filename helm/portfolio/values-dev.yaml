@@ -1,0 +1,7 @@
+replicaCount: 1
+
+ingress:
+  host: dev.portfolio.example.com
+
+hpa:
+  enabled: false
