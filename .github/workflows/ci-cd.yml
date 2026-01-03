@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  id-token: write
   security-events: write
 
 env:
@@ -19,6 +19,7 @@ env:
   TF_VAR_PROJECT_NAME: 'devops-portfolio'
   TF_VAR_ENVIRONMENT: 'prod'
   TF_VAR_LOCATION: 'eastus'
+  SUBSCRIPTION_ID: f26d88f1-e6f7-4017-8f8f-01be78d4e113
 
 # =======================================================
 # JOB 1: Code Quality & Security
@@ -27,6 +28,7 @@ jobs:
   code-quality:
     name: 🔍 Code Quality & Security
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +58,7 @@ jobs:
     name: 🏗️ Build & Test
     runs-on: ubuntu-latest
     needs: code-quality
+
     outputs:
       image-tag: ${{ steps.tag.outputs.tag }}
 
@@ -75,155 +78,87 @@ jobs:
         run: echo "tag=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 2.5: Setup Terraform Backend Storage
+# JOB 3: Setup Terraform Backend
 # =======================================================
   setup-backend:
     name: 🗄️ Setup Terraform Backend
     runs-on: ubuntu-latest
     needs: build-test
+
     outputs:
       storage_account_name: ${{ steps.backend.outputs.storage_account_name }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Secret Exists
-        run: |
-          if [ -z "${{ secrets.AZURE_CREDENTIALS }}" ]; then
-            echo "❌ AZURE_CREDENTIALS secret is empty or not set!"
-            exit 1
-          else
-            echo "✅ AZURE_CREDENTIALS secret exists"
-          fi
-
       - name: Azure Login
-        run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
-          
-          az login --service-principal \
-            -u "$CLIENT_ID" \
-            -p "$CLIENT_SECRET" \
-            --tenant "$TENANT_ID"
-          
-          az account set --subscription "$SUBSCRIPTION_ID"
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Debug Azure Subscription
-        run: |
-          echo "=== Current Subscription Info ==="
-          az account show
-          echo "=== Subscription ID ==="
-          az account show --query id -o tsv
+      - name: Set Subscription Context
+        run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
 
-      - name: Create Terraform Backend Storage
+      - name: Create Backend Storage
         id: backend
         run: |
-          RESOURCE_GROUP="${{ env.BACKEND_RG }}"
+          set -e
+
+          RG="${{ env.BACKEND_RG }}"
           LOCATION="${{ env.TF_VAR_LOCATION }}"
-          # Generate unique storage account name (3-24 chars, lowercase, numbers only)
-          STORAGE_ACCOUNT="tfstate$(echo ${{ github.repository }} | sed 's/[^a-z0-9]//g' | cut -c1-10)$(date +%s | tail -c 6)"
-          CONTAINER_NAME="tfstate"
-          
-          echo "🔧 Creating backend infrastructure..."
-          
-          # Verify we can access the subscription
-          echo "Verifying subscription access..."
-          CURRENT_SUB=$(az account show --query id -o tsv)
-          echo "Current subscription: $CURRENT_SUB"
-          
-          # Try to list resource groups to verify permissions
-          echo "Testing permissions by listing resource groups..."
-          az group list --query "[].{name:name, location:location}" -o table || {
-            echo "❌ Failed to list resource groups. Checking permissions..."
-            az role assignment list --assignee $(az account show --query user.name -o tsv) --all -o table
-            exit 1
-          }
-          
-          # Create resource group if it doesn't exist
-          echo "Creating resource group: $RESOURCE_GROUP"
-          az group create \
-            --name "$RESOURCE_GROUP" \
-            --location "$LOCATION" \
-            --output json || {
-              echo "❌ Failed to create resource group. Error details above."
-              exit 1
-            }
-          
-          # Check if storage account exists
+          CONTAINER="tfstate"
+
+          STORAGE="tfstate$(echo devopsportfolio | tr -cd 'a-z0-9' | cut -c1-10)$(date +%s | tail -c 6)"
+
+          az group create --name "$RG" --location "$LOCATION" --output none
+
           EXISTING=$(az storage account list \
-            --resource-group "$RESOURCE_GROUP" \
-            --query "[?starts_with(name, 'tfstate')].name" \
-            -o tsv | head -n 1)
-          
+            --resource-group "$RG" \
+            --query "[?starts_with(name, 'tfstate')].name" -o tsv | head -n1)
+
           if [ -z "$EXISTING" ]; then
-            echo "✨ Creating new storage account: $STORAGE_ACCOUNT"
             az storage account create \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$STORAGE_ACCOUNT" \
+              --name "$STORAGE" \
+              --resource-group "$RG" \
               --sku Standard_LRS \
-              --encryption-services blob \
               --min-tls-version TLS1_2 \
               --allow-blob-public-access false \
               --output none
-            
-            STORAGE_ACCOUNT_FINAL="$STORAGE_ACCOUNT"
+            FINAL="$STORAGE"
           else
-            echo "♻️  Using existing storage account: $EXISTING"
-            STORAGE_ACCOUNT_FINAL="$EXISTING"
+            FINAL="$EXISTING"
           fi
-          
-          # Get storage account key
-          ACCOUNT_KEY=$(az storage account keys list \
-            --resource-group "$RESOURCE_GROUP" \
-            --account-name "$STORAGE_ACCOUNT_FINAL" \
-            --query '[0].value' -o tsv)
-          
-          # Create blob container if it doesn't exist
-          echo "Creating container: $CONTAINER_NAME"
+
           az storage container create \
-            --name "$CONTAINER_NAME" \
-            --account-name "$STORAGE_ACCOUNT_FINAL" \
-            --account-key "$ACCOUNT_KEY" \
+            --name "$CONTAINER" \
+            --account-name "$FINAL" \
+            --auth-mode login \
             --output none || true
-          
-          echo "✅ Backend setup complete!"
-          echo "📦 Storage Account: $STORAGE_ACCOUNT_FINAL"
-          echo "📁 Container: $CONTAINER_NAME"
-          
-          # Output for next job
-          echo "storage_account_name=$STORAGE_ACCOUNT_FINAL" >> $GITHUB_OUTPUT
+
+          echo "storage_account_name=$FINAL" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 3: Terraform – Azure Infra
+# JOB 4: Terraform Deploy
 # =======================================================
   terraform-deploy:
     name: 🏗️ Terraform Azure Infra
     runs-on: ubuntu-latest
-    needs: [build-test, setup-backend]
+    needs: setup-backend
+
     outputs:
-      acr_name: ${{ steps.tf_outputs.outputs.acr_name }}
-      acr_login_server: ${{ steps.tf_outputs.outputs.acr_login_server }}
-      aks_name: ${{ steps.tf_outputs.outputs.aks_name }}
-      aks_rg: ${{ steps.tf_outputs.outputs.aks_rg }}
+      acr_name: ${{ steps.tfout.outputs.acr_name }}
+      acr_login_server: ${{ steps.tfout.outputs.acr_login_server }}
+      aks_name: ${{ steps.tfout.outputs.aks_name }}
+      aks_rg: ${{ steps.tfout.outputs.aks_rg }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
-          
-          az login --service-principal \
-            -u "$CLIENT_ID" \
-            -p "$CLIENT_SECRET" \
-            --tenant "$TENANT_ID"
-          
-          az account set --subscription "$SUBSCRIPTION_ID"
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -237,20 +172,16 @@ jobs:
             -backend-config="resource_group_name=${{ env.BACKEND_RG }}" \
             -backend-config="storage_account_name=${{ needs.setup-backend.outputs.storage_account_name }}" \
             -backend-config="container_name=tfstate" \
-            -backend-config="key=portfolio.terraform.tfstate"
-
-      - name: Terraform Plan
-        run: |
-          cd terraform
-          terraform plan -out=tfplan
+            -backend-config="key=infra.tfstate" \
+            -backend-config="use_azuread_auth=true"
 
       - name: Terraform Apply
         run: |
           cd terraform
-          terraform apply -auto-approve tfplan
+          terraform apply -auto-approve
 
-      - name: Extract Terraform Outputs
-        id: tf_outputs
+      - name: Extract Outputs
+        id: tfout
         run: |
           cd terraform
           echo "acr_name=$(terraform output -raw acr_name)" >> $GITHUB_OUTPUT
@@ -259,114 +190,75 @@ jobs:
           echo "aks_rg=$(terraform output -raw aks_rg)" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 4: Docker Build & Push to ACR
+# JOB 5: Docker Build & Push
 # =======================================================
   docker-build-push:
     name: 🐳 Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: [build-test, terraform-deploy]
+    needs: terraform-deploy
+
     outputs:
       image-uri: ${{ steps.push.outputs.image }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
-          
-          az login --service-principal \
-            -u "$CLIENT_ID" \
-            -p "$CLIENT_SECRET" \
-            --tenant "$TENANT_ID"
-          
-          az account set --subscription "$SUBSCRIPTION_ID"
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to ACR
-        run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
+      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
 
-      - name: Build & Push Image
-        id: push
-        env:
-          ACR_LOGIN: ${{ needs.terraform-deploy.outputs.acr_login_server }}
-          IMAGE_TAG: ${{ needs.build-test.outputs.image-tag }}
+      - run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
+
+      - id: push
         run: |
-          IMAGE="$ACR_LOGIN/portfolio-website:$IMAGE_TAG"
-          docker build -t "$IMAGE" -t "$ACR_LOGIN/portfolio-website:latest" .
+          IMAGE="${{ needs.terraform-deploy.outputs.acr_login_server }}/portfolio-website:${{ github.sha }}"
+          docker build -t "$IMAGE" -t "${IMAGE%:*}:latest" .
           docker push "$IMAGE"
-          docker push "$ACR_LOGIN/portfolio-website:latest"
+          docker push "${IMAGE%:*}:latest"
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 5: Deploy to AKS using HELM + HPA
+# JOB 6: Deploy to AKS (Helm + HPA)
 # =======================================================
   deploy-to-aks:
-    name: 🚀 Deploy to AKS (Helm)
+    name: 🚀 Deploy to AKS
     runs-on: ubuntu-latest
-    needs: [terraform-deploy, docker-build-push]
+    needs: docker-build-push
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
-          
-          az login --service-principal \
-            -u "$CLIENT_ID" \
-            -p "$CLIENT_SECRET" \
-            --tenant "$TENANT_ID"
-          
-          az account set --subscription "$SUBSCRIPTION_ID"
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Get AKS Credentials
-        run: |
+      - run: az account set --subscription ${{ env.SUBSCRIPTION_ID }}
+
+      - run: |
           az aks get-credentials \
             --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
             --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
             --overwrite-existing
 
-      - name: Attach ACR to AKS
-        run: |
-          az aks update \
-            --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
-            --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
-            --attach-acr "${{ needs.terraform-deploy.outputs.acr_name }}"
-
       - uses: azure/setup-helm@v4
-        with:
-          version: v3.15.0
 
-      - name: Create Namespace
-        run: |
-          kubectl create namespace production \
-            --dry-run=client -o yaml | kubectl apply -f -
+      - run: |
+          kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Deploy via Helm
-        env:
-          IMAGE_URI: ${{ needs.docker-build-push.outputs.image-uri }}
-        run: |
-          IMAGE_REPO=$(echo $IMAGE_URI | cut -d: -f1)
-          IMAGE_TAG=$(echo $IMAGE_URI | cut -d: -f2)
-
+      - run: |
+          IMAGE="${{ needs.docker-build-push.outputs.image-uri }}"
           helm upgrade --install portfolio-prod ./helm/portfolio \
             -n production \
             -f helm/portfolio/values-prod.yaml \
-            --set image.repository=$IMAGE_REPO \
-            --set image.tag=$IMAGE_TAG
+            --set image.repository=${IMAGE%:*} \
+            --set image.tag=${IMAGE##*:}
 
-      - name: Verify Deployment
-        run: |
-          kubectl get deploy,svc,hpa -n production
+      - run: kubectl get deploy,svc,hpa -n production
 
 # =======================================================
-# JOB 6: Pipeline Summary
+# JOB 7: Summary
 # =======================================================
   notify:
     name: 📊 Pipeline Summary
