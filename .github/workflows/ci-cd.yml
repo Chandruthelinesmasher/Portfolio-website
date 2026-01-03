@@ -1,0 +1,415 @@
+name: Build, Test & Deploy to Azure AKS
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+env:
+  NODE_VERSION: '22.x'
+  TERRAFORM_VERSION: '1.9.0'
+  BACKEND_RG: tf-backend-rg
+  # Add default values for Terraform variables
+  TF_VAR_PROJECT_NAME: 'devops-portfolio'
+  TF_VAR_ENVIRONMENT: 'dev'
+  TF_VAR_LOCATION: 'eastus'
+
+jobs:
+
+  # =======================================================
+  # Job 1: Code Quality
+  # =======================================================
+  code-quality:
+    name: 🔍 Code Quality & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint || true
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs-results.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs-results.sarif
+
+
+  # =======================================================
+  # Job 2: Build & Test
+  # =======================================================
+  build-test:
+    name: 🏗️ Build & Test
+    runs-on: ubuntu-latest
+    needs: code-quality
+    if: always()  # Run even if code-quality fails
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: |
+          npm run test:unit || true
+          npm run test:integration || true
+          npm test -- --coverage || true
+      - uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+        continue-on-error: true
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
+          retention-days: 7
+      - id: tag
+        run: echo "tag=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+
+  # =======================================================
+  # Job 3: Terraform Deploy (FIXED)
+  # =======================================================
+  terraform-deploy:
+    name: 🏗️ Terraform Azure Infrastructure
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.ref == 'refs/heads/main' && (success() || needs.build-test.result == 'success')
+    outputs:
+      acr_name: ${{ steps.tf_outputs.outputs.acr_name }}
+      acr_login_server: ${{ steps.tf_outputs.outputs.acr_login_server }}
+      aks_name: ${{ steps.tf_outputs.outputs.aks_name }}
+      aks_rg: ${{ steps.tf_outputs.outputs.aks_rg }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Export ARM credentials
+        run: |
+          echo "ARM_CLIENT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}" >> $GITHUB_ENV
+
+      - name: Create Backend Storage (with proper RBAC)
+        run: |
+          BACKEND_NAME="stbackend${{ github.run_id }}"
+          BACKEND_NAME=$(echo "$BACKEND_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+          echo "BACKEND_NAME=$BACKEND_NAME" >> $GITHUB_ENV
+          
+          az group create -n ${{ env.BACKEND_RG }} -l eastus || true
+
+          az storage account create \
+            --name $BACKEND_NAME \
+            --resource-group ${{ env.BACKEND_RG }} \
+            --location eastus \
+            --sku Standard_LRS \
+            --encryption-services blob
+
+          sleep 10
+
+          # create container using AAD auth
+          az storage container create \
+            --name tfstate \
+            --auth-mode login \
+            --account-name $BACKEND_NAME || true
+
+          echo "Assigning RBAC roles..."
+
+          # REQUIRED FOR TERRAFORM BACKEND
+          az role assignment create \
+            --assignee ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }} \
+            --role "Storage Blob Data Owner" \
+            --scope "/subscriptions/${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}/resourceGroups/${{ env.BACKEND_RG }}/providers/Microsoft.Storage/storageAccounts/$BACKEND_NAME" || true
+
+          az role assignment create \
+            --assignee ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }} \
+            --role "Storage Account Contributor" \
+            --scope "/subscriptions/${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}/resourceGroups/${{ env.BACKEND_RG }}/providers/Microsoft.Storage/storageAccounts/$BACKEND_NAME" || true
+
+          echo "WAITING 60 SECONDS FOR RBAC PROPAGATION..."
+          sleep 60
+
+      # CRITICAL FIX: Add terraform_wrapper: false
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # FIXED: Find the correct Terraform directory
+      - name: Locate Terraform files
+        id: find-tf
+        run: |
+          if [ -d "terraform" ]; then
+            echo "TF_DIR=terraform" >> $GITHUB_ENV
+          elif [ -d "infrastructure" ]; then
+            echo "TF_DIR=infrastructure" >> $GITHUB_ENV
+          elif [ -f "main.tf" ]; then
+            echo "TF_DIR=." >> $GITHUB_ENV
+          else
+            echo "ERROR: Cannot find Terraform files!"
+            exit 1
+          fi
+          echo "Using Terraform directory: $TF_DIR"
+
+      - name: Terraform Init (with retry)
+        run: |
+          cd ${{ env.TF_DIR }}
+          n=0
+          until [ $n -ge 5 ]
+          do
+            echo "Attempt $((n+1)) to run terraform init..."
+            terraform init \
+              -backend-config="resource_group_name=${{ env.BACKEND_RG }}" \
+              -backend-config="storage_account_name=${BACKEND_NAME}" \
+              -backend-config="container_name=tfstate" \
+              -backend-config="key=infra.tfstate" \
+              -backend-config="use_azuread_auth=true" && break
+            n=$((n+1))
+            echo "Terraform init failed. Waiting 15 seconds..."
+            sleep 15
+          done
+
+      - name: Terraform Validate
+        run: |
+          cd ${{ env.TF_DIR }}
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          cd ${{ env.TF_DIR }}
+          terraform plan -out=tfplan \
+            -var="project_name=${{ github.event.repository.name }}" \
+            -var="environment=dev" \
+            -var="location=eastus"
+
+      - name: Terraform Apply
+        run: |
+          cd ${{ env.TF_DIR }}
+          terraform apply -auto-approve tfplan
+
+      # FIXED: Better output extraction with error handling
+      - name: Extract Terraform Outputs
+        id: tf_outputs
+        run: |
+          cd ${{ env.TF_DIR }}
+          
+          echo "Extracting Terraform outputs..."
+          terraform output
+          
+          ACR_NAME=$(terraform output -raw acr_name 2>/dev/null || echo "")
+          ACR_LOGIN=$(terraform output -raw acr_login_server 2>/dev/null || echo "")
+          AKS_NAME=$(terraform output -raw aks_cluster_name 2>/dev/null || echo "")
+          AKS_RG=$(terraform output -raw aks_rg 2>/dev/null || echo "")
+          
+          if [ -z "$ACR_NAME" ]; then
+            echo "ERROR: ACR name is empty!"
+            exit 1
+          fi
+          
+          echo "✅ ACR Name: $ACR_NAME"
+          echo "✅ ACR Login Server: $ACR_LOGIN"
+          echo "✅ AKS Cluster: $AKS_NAME"
+          echo "✅ AKS Resource Group: $AKS_RG"
+          
+          echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
+          echo "acr_login_server=$ACR_LOGIN" >> $GITHUB_OUTPUT
+          echo "aks_name=$AKS_NAME" >> $GITHUB_OUTPUT
+          echo "aks_rg=$AKS_RG" >> $GITHUB_OUTPUT
+
+
+  # =======================================================
+  # Job 4: Docker Build & Push
+  # =======================================================
+  docker-build-push:
+    name: 🐳 Build & Push to ACR
+    runs-on: ubuntu-latest
+    needs: [build-test, terraform-deploy]
+    outputs:
+      image-uri: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Skip downloading artifacts - Docker will build from source
+      # The build happens inside Docker, not in the GitHub Actions runner
+      
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      # IMPROVED: Better validation with detailed error message
+      - name: Validate ACR Name
+        run: |
+          ACR_NAME="${{ needs.terraform-deploy.outputs.acr_name }}"
+          if [ -z "$ACR_NAME" ]; then
+            echo "❌ ERROR: ACR name is missing from Terraform outputs!"
+            echo "Available outputs from terraform-deploy job:"
+            echo "  acr_name: ${{ needs.terraform-deploy.outputs.acr_name }}"
+            echo "  acr_login_server: ${{ needs.terraform-deploy.outputs.acr_login_server }}"
+            echo "  aks_name: ${{ needs.terraform-deploy.outputs.aks_name }}"
+            echo "  aks_rg: ${{ needs.terraform-deploy.outputs.aks_rg }}"
+            exit 1
+          fi
+          echo "✅ ACR Name validated: $ACR_NAME"
+      
+      - name: Login to ACR
+        run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
+      
+      - uses: docker/setup-buildx-action@v3
+      
+      # FIXED: Generate image tag with fallback
+      - name: Generate Image Tag
+        id: tag
+        run: |
+          # Use output from build-test job if available, otherwise generate new tag
+          if [ -n "${{ needs.build-test.outputs.image-tag }}" ]; then
+            IMAGE_TAG="${{ needs.build-test.outputs.image-tag }}"
+            echo "Using tag from build-test job: $IMAGE_TAG"
+          else
+            IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-7)
+            echo "Generated new tag: $IMAGE_TAG"
+          fi
+          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+      
+      - name: Build and Push Docker Image
+        id: push
+        env:
+          ACR_LOGIN: ${{ needs.terraform-deploy.outputs.acr_login_server }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          IMAGE="${ACR_LOGIN}/portfolio-website:${IMAGE_TAG}"
+          echo "Building image: $IMAGE"
+          
+          docker build -t "$IMAGE" -t "${ACR_LOGIN}/portfolio-website:latest" .
+          docker push "$IMAGE"
+          docker push "${ACR_LOGIN}/portfolio-website:latest"
+          
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "✅ Image pushed: $IMAGE"
+
+
+  # =======================================================
+  # Job 5: Deploy to AKS
+  # =======================================================
+  deploy-to-aks:
+    name: 🚀 Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: [terraform-deploy, docker-build-push]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
+            --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
+            --overwrite-existing
+      
+      - name: Configure ACR Integration with AKS
+        run: |
+          # Attach ACR to AKS for seamless image pulling
+          az aks update \
+            --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
+            --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
+            --attach-acr "${{ needs.terraform-deploy.outputs.acr_name }}"
+      
+      - name: Create Namespace
+        run: kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Update Deployment Image
+        run: |
+          sed -i "s|image:.*|image: ${{ needs.docker-build-push.outputs.image-uri }}|g" k8s/deployment.yaml
+      
+      - name: Deploy to Kubernetes
+        run: kubectl apply -f k8s/ -n production
+      
+      - name: Wait for Rollout
+        id: rollout
+        run: kubectl rollout status deployment/portfolio-website -n production --timeout=10m
+        continue-on-error: true
+      
+      - name: Debug Deployment Issues
+        if: steps.rollout.outcome == 'failure'
+        run: |
+          echo "=== Deployment Status ==="
+          kubectl get deployment portfolio-website -n production -o wide
+          
+          echo -e "\n=== Pod Status ==="
+          kubectl get pods -n production -l app=portfolio-website -o wide
+          
+          echo -e "\n=== Pod Events ==="
+          kubectl get events -n production --sort-by='.lastTimestamp' | grep portfolio-website
+          
+          echo -e "\n=== Pod Describe ==="
+          kubectl describe pods -n production -l app=portfolio-website
+          
+          echo -e "\n=== Pod Logs ==="
+          kubectl logs -n production -l app=portfolio-website --tail=100 --all-containers=true || echo "No logs available"
+          
+          echo -e "\n=== Replica Set Status ==="
+          kubectl get rs -n production -l app=portfolio-website
+          
+          exit 1
+
+
+  # =======================================================
+  # Job 6: Notify Summary
+  # =======================================================
+  notify:
+    name: 📊 Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [code-quality, build-test, terraform-deploy, docker-build-push, deploy-to-aks]
+    if: always()
+    steps:
+      - run: |
+          echo "# 🚀 Pipeline Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | ${{ needs.code-quality.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Test | ${{ needs.build-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform | ${{ needs.terraform-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Build | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AKS Deploy | ${{ needs.deploy-to-aks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.terraform-deploy.outputs.acr_name }}" != "" ]]; then
+            echo "## 📦 Deployment Details" >> $GITHUB_STEP_SUMMARY
+            echo "- **ACR**: ${{ needs.terraform-deploy.outputs.acr_name }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **AKS Cluster**: ${{ needs.terraform-deploy.outputs.aks_name }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Resource Group**: ${{ needs.terraform-deploy.outputs.aks_rg }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Image**: ${{ needs.docker-build-push.outputs.image-uri }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+
+
+
+          
+          

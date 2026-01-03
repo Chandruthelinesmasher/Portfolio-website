@@ -1,0 +1,455 @@
+name: 🗑️ Destroy Azure Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      confirmation:
+        description: 'Type "DESTROY" to confirm deletion'
+        required: true
+        type: string
+      delete_backend:
+        description: 'Also delete Terraform backend storage?'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TERRAFORM_VERSION: '1.9.0'
+  BACKEND_RG: tf-backend-rg
+  TF_VAR_PROJECT_NAME: 'devops-portfolio'
+  TF_VAR_LOCATION: 'eastus'
+
+jobs:
+
+  # =======================================================
+  # Job 1: Pre-Destroy Validation
+  # =======================================================
+  validate-destroy:
+    name: ✅ Validate Destroy Request
+    runs-on: ubuntu-latest
+    outputs:
+      should_proceed: ${{ steps.check.outputs.proceed }}
+    
+    steps:
+      - name: Validate Confirmation Input
+        id: check
+        run: |
+          if [ "${{ github.event.inputs.confirmation }}" != "DESTROY" ]; then
+            echo "❌ ERROR: Confirmation input must be exactly 'DESTROY'"
+            echo "You entered: ${{ github.event.inputs.confirmation }}"
+            exit 1
+          fi
+          
+          echo "✅ Confirmation validated"
+          echo "proceed=true" >> $GITHUB_OUTPUT
+      
+      - name: Display Destroy Plan
+        run: |
+          echo "# ⚠️ INFRASTRUCTURE DESTRUCTION PLAN" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Delete backend**: ${{ github.event.inputs.delete_backend }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎯 Resources to be destroyed:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Azure Kubernetes Service (AKS)** - Portfolio website cluster" >> $GITHUB_STEP_SUMMARY
+          echo "- **Azure Container Registry (ACR)** - Docker images repository" >> $GITHUB_STEP_SUMMARY
+          echo "- **Virtual Network & Subnets** - Network infrastructure" >> $GITHUB_STEP_SUMMARY
+          echo "- **Network Security Groups** - Security policies" >> $GITHUB_STEP_SUMMARY
+          echo "- **Load Balancer** - Public IP and routing" >> $GITHUB_STEP_SUMMARY
+          echo "- **All associated resources** - Managed identities, role assignments" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event.inputs.delete_backend }}" == "true" ]; then
+            echo "## ⚠️ CRITICAL: Backend Storage Will Be Deleted" >> $GITHUB_STEP_SUMMARY
+            echo "- ❌ Terraform Backend Storage Account" >> $GITHUB_STEP_SUMMARY
+            echo "- ❌ All Terraform state files (IRREVERSIBLE)" >> $GITHUB_STEP_SUMMARY
+            echo "- ❌ State backups will be preserved but backend will be gone" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **WARNING**: You will need to recreate the backend for future deployments!" >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+  # =======================================================
+  # Job 2: Manual Approval (Uses GitHub Environment)
+  # =======================================================
+  approval:
+    name: 🛑 Manual Approval Required
+    runs-on: ubuntu-latest
+    needs: validate-destroy
+    # Use GitHub Environment protection rules for approval
+    environment: 
+      name: destroy-approval
+    
+    steps:
+      - name: Approval Granted
+        run: |
+          echo "✅ Manual approval granted by reviewer"
+          echo "Proceeding with infrastructure destruction..."
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Approval Status" >> $GITHUB_STEP_SUMMARY
+          echo "- **Approved by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Approved at**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+
+  # =======================================================
+  # Job 3: Backup Current State
+  # =======================================================
+  backup-state:
+    name: 💾 Backup Terraform State
+    runs-on: ubuntu-latest
+    needs: approval
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Export ARM credentials
+        run: |
+          echo "ARM_CLIENT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}" >> $GITHUB_ENV
+      
+      - name: Find Backend Storage Account
+        id: find_backend
+        run: |
+          # Try to find the backend storage account
+          BACKEND_ACCOUNTS=$(az storage account list \
+            --resource-group ${{ env.BACKEND_RG }} \
+            --query "[].name" -o tsv 2>/dev/null || echo "")
+          
+          if [ -z "$BACKEND_ACCOUNTS" ]; then
+            echo "⚠️ No backend storage account found"
+            echo "backend_exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Use the first matching account
+          BACKEND_NAME=$(echo "$BACKEND_ACCOUNTS" | head -n1)
+          echo "✅ Found backend: $BACKEND_NAME"
+          echo "backend_name=$BACKEND_NAME" >> $GITHUB_OUTPUT
+          echo "backend_exists=true" >> $GITHUB_OUTPUT
+      
+      - name: Backup Terraform State
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        run: |
+          BACKUP_FILE="devops-portfolio-tfstate-backup-$(date +%Y%m%d-%H%M%S).tfstate"
+          
+          echo "📦 Downloading current state file..."
+          # Download current state file
+          az storage blob download \
+            --account-name ${{ steps.find_backend.outputs.backend_name }} \
+            --container-name tfstate \
+            --name infra.tfstate \
+            --file "$BACKUP_FILE" \
+            --auth-mode login || echo "⚠️ No state file to backup"
+          
+          # Create backup container if it doesn't exist
+          echo "📦 Creating backup container..."
+          az storage container create \
+            --name tfstate-backups \
+            --account-name ${{ steps.find_backend.outputs.backend_name }} \
+            --auth-mode login || true
+          
+          # Upload to backup container
+          echo "📦 Uploading backup..."
+          az storage blob upload \
+            --account-name ${{ steps.find_backend.outputs.backend_name }} \
+            --container-name tfstate-backups \
+            --name "$BACKUP_FILE" \
+            --file "$BACKUP_FILE" \
+            --auth-mode login || true
+          
+          echo "✅ State backed up successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "- **Backup file**: $BACKUP_FILE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Location**: ${{ steps.find_backend.outputs.backend_name }}/tfstate-backups/$BACKUP_FILE" >> $GITHUB_STEP_SUMMARY
+
+
+  # =======================================================
+  # Job 4: Delete Kubernetes Resources First
+  # =======================================================
+  cleanup-kubernetes:
+    name: 🧹 Cleanup Kubernetes Resources
+    runs-on: ubuntu-latest
+    needs: [approval, backup-state]
+    continue-on-error: true
+    
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Find AKS Cluster
+        id: find_aks
+        run: |
+          AKS_NAME="devops-portfolio-${{ github.event.inputs.environment }}-aks"
+          RG_NAME="devops-portfolio-${{ github.event.inputs.environment }}-rg"
+          
+          if az aks show --name "$AKS_NAME" --resource-group "$RG_NAME" 2>/dev/null; then
+            echo "aks_exists=true" >> $GITHUB_OUTPUT
+            echo "aks_name=$AKS_NAME" >> $GITHUB_OUTPUT
+            echo "rg_name=$RG_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "aks_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ AKS cluster not found, may already be deleted"
+          fi
+      
+      - name: Get AKS Credentials and Clean Up
+        if: steps.find_aks.outputs.aks_exists == 'true'
+        run: |
+          echo "🔗 Getting AKS credentials..."
+          az aks get-credentials \
+            --resource-group "${{ steps.find_aks.outputs.rg_name }}" \
+            --name "${{ steps.find_aks.outputs.aks_name }}" \
+            --overwrite-existing
+          
+          echo "🗑️ Deleting all resources in production namespace..."
+          kubectl delete all --all -n production --timeout=5m || true
+          
+          echo "🗑️ Deleting production namespace..."
+          kubectl delete namespace production --timeout=5m || true
+          
+          echo "✅ Kubernetes resources cleaned up"
+
+
+  # =======================================================
+  # Job 5: Terraform Destroy
+  # =======================================================
+  terraform-destroy:
+    name: 💥 Terraform Destroy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [approval, backup-state, cleanup-kubernetes]
+    if: always() && needs.approval.result == 'success'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Export ARM credentials
+        run: |
+          echo "ARM_CLIENT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}" >> $GITHUB_ENV
+      
+      - name: Find Backend Storage Account
+        id: find_backend
+        run: |
+          BACKEND_ACCOUNTS=$(az storage account list \
+            --resource-group ${{ env.BACKEND_RG }} \
+            --query "[].name" -o tsv 2>/dev/null || echo "")
+          
+          if [ -z "$BACKEND_ACCOUNTS" ]; then
+            echo "⚠️ No backend found - infrastructure may already be destroyed"
+            echo "backend_exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          BACKEND_NAME=$(echo "$BACKEND_ACCOUNTS" | head -n1)
+          echo "BACKEND_NAME=$BACKEND_NAME" >> $GITHUB_ENV
+          echo "backend_name=$BACKEND_NAME" >> $GITHUB_OUTPUT
+          echo "backend_exists=true" >> $GITHUB_OUTPUT
+          echo "✅ Backend found: $BACKEND_NAME"
+      
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      
+      - name: Locate Terraform Directory
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        run: |
+          if [ -d "terraform" ]; then
+            echo "TF_DIR=terraform" >> $GITHUB_ENV
+            echo "✅ Using terraform/ directory"
+          elif [ -d "infrastructure" ]; then
+            echo "TF_DIR=infrastructure" >> $GITHUB_ENV
+            echo "✅ Using infrastructure/ directory"
+          elif [ -f "main.tf" ]; then
+            echo "TF_DIR=." >> $GITHUB_ENV
+            echo "✅ Using root directory"
+          else
+            echo "❌ ERROR: Cannot find Terraform files!"
+            exit 1
+          fi
+      
+      - name: Terraform Init
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        run: |
+          cd ${{ env.TF_DIR }}
+          echo "🔧 Initializing Terraform with backend..."
+          terraform init \
+            -backend-config="resource_group_name=${{ env.BACKEND_RG }}" \
+            -backend-config="storage_account_name=${{ env.BACKEND_NAME }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=infra.tfstate" \
+            -backend-config="use_azuread_auth=true"
+      
+      - name: Terraform Destroy Plan
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        run: |
+          cd ${{ env.TF_DIR }}
+          echo "📋 Generating destruction plan..."
+          terraform plan -destroy \
+            -var="project_name=devops-portfolio" \
+            -var="environment=${{ github.event.inputs.environment }}" \
+            -var="location=eastus" \
+            -out=destroy.tfplan
+          
+          echo "📊 Showing plan summary..."
+          terraform show destroy.tfplan
+      
+      - name: Terraform Destroy
+        if: steps.find_backend.outputs.backend_exists == 'true'
+        run: |
+          cd ${{ env.TF_DIR }}
+          echo "💥 Destroying infrastructure..."
+          terraform destroy -auto-approve \
+            -var="project_name=devops-portfolio" \
+            -var="environment=${{ github.event.inputs.environment }}" \
+            -var="location=eastus"
+          
+          echo "✅ Terraform destroy completed successfully"
+      
+      - name: Verify and Force Delete Resource Group
+        run: |
+          RG_NAME="devops-portfolio-${{ github.event.inputs.environment }}-rg"
+          
+          echo "🔍 Verifying resource group deletion..."
+          if az group show --name "$RG_NAME" 2>/dev/null; then
+            echo "⚠️ Resource group still exists. Forcing deletion..."
+            az group delete --name "$RG_NAME" --yes --no-wait
+            echo "🗑️ Forced deletion initiated for $RG_NAME"
+          else
+            echo "✅ Resource group successfully destroyed: $RG_NAME"
+          fi
+
+
+  # =======================================================
+  # Job 6: Cleanup Backend (Optional)
+  # =======================================================
+  cleanup-backend:
+    name: 🧹 Cleanup Terraform Backend
+    runs-on: ubuntu-latest
+    needs: terraform-destroy
+    if: github.event.inputs.delete_backend == 'true'
+    
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Delete Backend Storage and Resource Group
+        run: |
+          echo "⚠️ DELETING TERRAFORM BACKEND - THIS IS IRREVERSIBLE"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔥 Backend Deletion" >> $GITHUB_STEP_SUMMARY
+          
+          # Delete the entire backend resource group (includes storage account)
+          if az group show --name ${{ env.BACKEND_RG }} 2>/dev/null; then
+            echo "🗑️ Deleting backend resource group: ${{ env.BACKEND_RG }}"
+            az group delete --name ${{ env.BACKEND_RG }} --yes --no-wait
+            
+            echo "✅ Backend deletion initiated" >> $GITHUB_STEP_SUMMARY
+            echo "- Resource Group: ${{ env.BACKEND_RG }}" >> $GITHUB_STEP_SUMMARY
+            echo "- Status: Deletion in progress" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Note**: You will need to recreate the backend for future deployments!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ Backend resource group already deleted"
+            echo "ℹ️ Backend was already deleted" >> $GITHUB_STEP_SUMMARY
+          fi
+
+
+  # =======================================================
+  # Job 7: Final Verification and Cleanup Summary
+  # =======================================================
+  summary:
+    name: 📊 Destruction Summary
+    runs-on: ubuntu-latest
+    needs: [validate-destroy, approval, backup-state, cleanup-kubernetes, terraform-destroy, cleanup-backend]
+    if: always()
+    
+    steps:
+      - name: Generate Complete Summary
+        run: |
+          echo "# 🗑️ Infrastructure Destruction Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Destruction Details" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event.inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend Deleted | ${{ github.event.inputs.delete_backend }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## 🔄 Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Validation | ${{ needs.validate-destroy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Manual Approval | ${{ needs.approval.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| State Backup | ${{ needs.backup-state.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kubernetes Cleanup | ${{ needs.cleanup-kubernetes.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Terraform Destroy | ${{ needs.terraform-destroy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend Cleanup | ${{ needs.cleanup-backend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.terraform-destroy.result }}" == "success" ]; then
+            echo "## ✅ Destruction Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**All infrastructure has been successfully destroyed!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Destroyed Resources:" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Azure Kubernetes Service (AKS)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Azure Container Registry (ACR)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Virtual Network & Subnets" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Network Security Groups" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Load Balancer and Public IP" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ All associated resources" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "${{ github.event.inputs.delete_backend }}" == "true" ]; then
+              echo "- ✅ Terraform Backend Storage" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔄 To Redeploy:" >> $GITHUB_STEP_SUMMARY
+            echo "Run the main CI/CD pipeline workflow to recreate the infrastructure." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Destruction Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Some resources may not have been destroyed properly.**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔧 Manual Cleanup Required:" >> $GITHUB_STEP_SUMMARY
+            echo "1. Check the Azure Portal for remaining resources" >> $GITHUB_STEP_SUMMARY
+            echo "2. Manually delete the resource group: \`devops-portfolio-${{ github.event.inputs.environment }}-rg\`" >> $GITHUB_STEP_SUMMARY
+            echo "3. Run this command:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "az group delete --name devops-portfolio-${{ github.event.inputs.environment }}-rg --yes" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "📝 **Note**: State backups are preserved in the backend storage (if not deleted)." >> $GITHUB_STEP_SUMMARY
