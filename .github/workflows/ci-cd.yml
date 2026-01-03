@@ -89,19 +89,19 @@ jobs:
 
       - name: Check Secret Exists
         run: |
-          if [ -z "${{ secrets.AZURE_CREDENTIALS_NEW }}" ]; then
-            echo "❌ AZURE_CREDENTIALS_NEW secret is empty or not set!"
+          if [ -z "${{ secrets.AZURE_CREDENTIALS }}" ]; then
+            echo "❌ AZURE_CREDENTIALS secret is empty or not set!"
             exit 1
           else
-            echo "✅ AZURE_CREDENTIALS_NEW secret exists"
+            echo "✅ AZURE_CREDENTIALS secret exists"
           fi
 
       - name: Azure Login
         run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
           
           az login --service-principal \
             -u "$CLIENT_ID" \
@@ -116,8 +116,6 @@ jobs:
           az account show
           echo "=== Subscription ID ==="
           az account show --query id -o tsv
-          echo "=== All Available Subscriptions ==="
-          az account list --output table
 
       - name: Create Terraform Backend Storage
         id: backend
@@ -199,10 +197,10 @@ jobs:
 
       - name: Azure Login
         run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
           
           az login --service-principal \
             -u "$CLIENT_ID" \
@@ -259,10 +257,10 @@ jobs:
 
       - name: Azure Login
         run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
           
           az login --service-principal \
             -u "$CLIENT_ID" \
@@ -299,10 +297,10 @@ jobs:
 
       - name: Azure Login
         run: |
-          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
-          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
-          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
-          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .subscriptionId)
           
           az login --service-principal \
             -u "$CLIENT_ID" \
