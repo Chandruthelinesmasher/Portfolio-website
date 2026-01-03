@@ -87,9 +87,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
+      - name: Check Secret Exists
+        run: |
+          if [ -z "${{ secrets.AZURE_CREDENTIALS_NEW }}" ]; then
+            echo "❌ AZURE_CREDENTIALS_NEW secret is empty or not set!"
+            exit 1
+          else
+            echo "✅ AZURE_CREDENTIALS_NEW secret exists"
+          fi
+
+      - name: Azure Login
+        run: |
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          
+          az login --service-principal \
+            -u "$CLIENT_ID" \
+            -p "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
+          
+          az account set --subscription "$SUBSCRIPTION_ID"
 
       - name: Debug Azure Subscription
         run: |
@@ -178,9 +197,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
+      - name: Azure Login
+        run: |
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          
+          az login --service-principal \
+            -u "$CLIENT_ID" \
+            -p "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
+          
+          az account set --subscription "$SUBSCRIPTION_ID"
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -228,9 +257,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
+      - name: Azure Login
+        run: |
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          
+          az login --service-principal \
+            -u "$CLIENT_ID" \
+            -p "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
+          
+          az account set --subscription "$SUBSCRIPTION_ID"
 
       - name: Login to ACR
         run: az acr login --name "${{ needs.terraform-deploy.outputs.acr_name }}"
@@ -258,9 +297,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_NEW }}
+      - name: Azure Login
+        run: |
+          CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientId)
+          CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .clientSecret)
+          TENANT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .tenantId)
+          SUBSCRIPTION_ID=$(echo '${{ secrets.AZURE_CREDENTIALS_NEW }}' | jq -r .subscriptionId)
+          
+          az login --service-principal \
+            -u "$CLIENT_ID" \
+            -p "$CLIENT_SECRET" \
+            --tenant "$TENANT_ID"
+          
+          az account set --subscription "$SUBSCRIPTION_ID"
 
       - name: Get AKS Credentials
         run: |
