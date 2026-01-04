@@ -21,6 +21,7 @@ env:
   TF_VAR_LOCATION: 'eastus'
   NAMESPACE: production
   HELM_RELEASE_NAME: portfolio-prod
+  INGRESS_NGINX_VERSION: 'v1.8.1'
 
 # =======================================================
 # JOB 1: Code Quality & Security
@@ -260,12 +261,87 @@ jobs:
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 6: Deploy to AKS (Helm + HPA) - UPDATED
+# JOB 6: Setup Ingress Controller (NEW!)
+# =======================================================
+  setup-ingress-controller:
+    name: 🌐 Setup Ingress Controller
+    runs-on: ubuntu-latest
+    needs: terraform-deploy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ needs.terraform-deploy.outputs.aks_rg }}" \
+            --name "${{ needs.terraform-deploy.outputs.aks_name }}" \
+            --overwrite-existing
+
+      - name: Check if Ingress Controller Exists
+        id: check-ingress
+        run: |
+          if kubectl get namespace ingress-nginx &>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Ingress controller namespace exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "❌ Ingress controller not found"
+          fi
+
+      - name: Install Nginx Ingress Controller
+        if: steps.check-ingress.outputs.exists == 'false'
+        run: |
+          echo "📦 Installing Nginx Ingress Controller..."
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-${{ env.INGRESS_NGINX_VERSION }}/deploy/static/provider/cloud/deploy.yaml
+
+      - name: Wait for Ingress Controller
+        run: |
+          echo "⏳ Waiting for ingress controller to be ready..."
+          kubectl wait --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=300s || true
+          
+          echo ""
+          echo "✅ Ingress controller status:"
+          kubectl get pods -n ingress-nginx
+          kubectl get svc -n ingress-nginx
+
+      - name: Get Ingress External IP
+        id: ingress-ip
+        run: |
+          echo "⏳ Waiting for LoadBalancer IP assignment (max 3 minutes)..."
+          for i in {1..18}; do
+            EXTERNAL_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            
+            if [ ! -z "$EXTERNAL_IP" ]; then
+              echo "✅ Ingress LoadBalancer IP assigned: $EXTERNAL_IP"
+              echo "ingress_ip=$EXTERNAL_IP" >> $GITHUB_OUTPUT
+              break
+            fi
+            
+            echo "Attempt $i/18: IP not assigned yet, waiting 10s..."
+            sleep 10
+          done
+          
+          if [ -z "$EXTERNAL_IP" ]; then
+            echo "⚠️ LoadBalancer IP not assigned within timeout"
+            echo "This is not critical - it may take a few more minutes"
+          fi
+
+# =======================================================
+# JOB 7: Deploy to AKS (Helm + HPA)
 # =======================================================
   deploy-to-aks:
     name: 🚀 Deploy to AKS (Helm)
     runs-on: ubuntu-latest
-    needs: [terraform-deploy, docker-build-push]
+    needs: [terraform-deploy, docker-build-push, setup-ingress-controller]
 
     steps:
       - uses: actions/checkout@v4
@@ -290,6 +366,11 @@ jobs:
 
       - name: Create or Update ACR Secret
         run: |
+          echo "🔐 Creating ACR credentials secret..."
+          
+          # Enable admin user on ACR
+          az acr update --name "${{ needs.terraform-deploy.outputs.acr_name }}" --admin-enabled true
+          
           # Get ACR credentials
           ACR_USERNAME=$(az acr credential show \
             --name "${{ needs.terraform-deploy.outputs.acr_name }}" \
@@ -297,6 +378,8 @@ jobs:
           ACR_PASSWORD=$(az acr credential show \
             --name "${{ needs.terraform-deploy.outputs.acr_name }}" \
             --query "passwords[0].value" -o tsv)
+          
+          echo "ACR Username: $ACR_USERNAME"
           
           # Delete existing secret if it exists
           kubectl delete secret acr-secret \
@@ -309,16 +392,19 @@ jobs:
             --docker-username="$ACR_USERNAME" \
             --docker-password="$ACR_PASSWORD" \
             -n ${{ env.NAMESPACE }}
+          
+          # Verify secret was created
+          kubectl get secret acr-secret -n ${{ env.NAMESPACE }} && echo "✅ ACR secret created successfully"
 
       - name: Helm Deploy
         run: |
           IMAGE="${{ needs.docker-build-push.outputs.image-uri }}"
           
-          echo "Deploying image: $IMAGE"
-          echo "Repository: ${IMAGE%:*}"
-          echo "Tag: ${IMAGE##*:}"
+          echo "🚀 Deploying image: $IMAGE"
+          echo "   Repository: ${IMAGE%:*}"
+          echo "   Tag: ${IMAGE##*:}"
+          echo ""
 
-          # Start deployment in background so we can monitor
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/portfolio \
             -n ${{ env.NAMESPACE }} \
             -f helm/portfolio/values-prod.yaml \
@@ -326,47 +412,11 @@ jobs:
             --set image.tag="${IMAGE##*:}" \
             --wait \
             --timeout 10m \
-            --debug &
-          
-          HELM_PID=$!
-          
-          # Monitor deployment progress
-          sleep 30
-          for i in {1..20}; do
-            echo ""
-            echo "=== Deployment Check $i/20 ==="
-            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=portfolio
-            
-            POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=portfolio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-            if [ ! -z "$POD_NAME" ]; then
-              POD_STATUS=$(kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.phase}')
-              echo "Pod Status: $POD_STATUS"
-              
-              # Check for image pull issues
-              if kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null | grep -q "ImagePullBackOff\|ErrImagePull"; then
-                echo "❌ IMAGE PULL ERROR DETECTED!"
-                kubectl describe pod $POD_NAME -n ${{ env.NAMESPACE }} | grep -A 10 "Events:"
-                kill $HELM_PID 2>/dev/null || true
-                exit 1
-              fi
-            fi
-            
-            # Check if helm finished
-            if ! kill -0 $HELM_PID 2>/dev/null; then
-              wait $HELM_PID
-              exit $?
-            fi
-            
-            sleep 15
-          done
-          
-          # Wait for helm to finish
-          wait $HELM_PID
+            --atomic
 
       - name: Wait for Deployment Readiness
         run: |
-          echo "Looking for deployment..."
-          kubectl get deployments -n ${{ env.NAMESPACE }}
+          echo "⏳ Waiting for deployment to be ready..."
           
           # Find the actual deployment name
           DEPLOYMENT_NAME=$(kubectl get deployments -n ${{ env.NAMESPACE }} \
@@ -380,43 +430,93 @@ jobs:
             exit 1
           fi
           
-          echo "Found deployment: $DEPLOYMENT_NAME"
+          echo "✅ Found deployment: $DEPLOYMENT_NAME"
           kubectl rollout status deployment/$DEPLOYMENT_NAME \
             -n ${{ env.NAMESPACE }} \
             --timeout=5m
 
       - name: Verify Deployment
         run: |
-          echo "=== Deployment Status ==="
+          echo "=== 📊 Deployment Status ==="
           kubectl get deployments -n ${{ env.NAMESPACE }}
           
           echo ""
-          echo "=== Pods Status ==="
+          echo "=== 🔵 Pods Status ==="
           kubectl get pods -n ${{ env.NAMESPACE }} -o wide
           
           echo ""
-          echo "=== Services ==="
+          echo "=== 🔌 Services ==="
           kubectl get svc -n ${{ env.NAMESPACE }}
           
           echo ""
-          echo "=== Ingress ==="
-          kubectl get ingress -n ${{ env.NAMESPACE }}
+          echo "=== 🌐 Ingress ==="
+          kubectl get ingress -n ${{ env.NAMESPACE }} -o wide
           
           echo ""
-          echo "=== HPA Status ==="
+          echo "=== 📈 HPA Status ==="
           kubectl get hpa -n ${{ env.NAMESPACE }}
 
       - name: Get Application URL
+        id: get-url
         run: |
           echo "=== 🎉 Application Deployed Successfully ==="
-          INGRESS_HOST=$(kubectl get ingress -n ${{ env.NAMESPACE }} \
-            -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || echo "N/A")
-          echo "Application URL: https://${INGRESS_HOST}"
           echo ""
+          
+          # Get ingress details
+          INGRESS_HOST=$(kubectl get ingress -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || echo "")
+          INGRESS_IP=$(kubectl get ingress -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          
+          # Get ingress controller IP if ingress IP not ready
+          if [ -z "$INGRESS_IP" ]; then
+            INGRESS_IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "pending")
+          fi
+          
           echo "📊 Deployment Details:"
           echo "  - Image: ${{ needs.docker-build-push.outputs.image-uri }}"
           echo "  - Namespace: ${{ env.NAMESPACE }}"
           echo "  - Release: ${{ env.HELM_RELEASE_NAME }}"
+          echo ""
+          echo "🌍 Access Information:"
+          echo "  - Hostname: $INGRESS_HOST"
+          echo "  - Ingress IP: $INGRESS_IP"
+          echo ""
+          
+          if [ "$INGRESS_IP" != "pending" ] && [ ! -z "$INGRESS_IP" ]; then
+            echo "✅ Your application is accessible at:"
+            echo "   🔗 https://$INGRESS_HOST"
+            echo ""
+            echo "📝 DNS Configuration:"
+            echo "   Configure DNS A record:"
+            echo "   $INGRESS_HOST → $INGRESS_IP"
+            echo ""
+            echo "🧪 Quick Test (without DNS):"
+            echo "   curl -H \"Host: $INGRESS_HOST\" http://$INGRESS_IP/health"
+          else
+            echo "⏳ Ingress IP is still being assigned..."
+            echo "   Check again in 2-3 minutes with:"
+            echo "   kubectl get ingress -n ${{ env.NAMESPACE }}"
+          fi
+          
+          # Save to output
+          echo "ingress_ip=$INGRESS_IP" >> $GITHUB_OUTPUT
+          echo "ingress_host=$INGRESS_HOST" >> $GITHUB_OUTPUT
+
+      - name: Test Application Health
+        run: |
+          echo "🏥 Testing application health..."
+          
+          # Get pod to test
+          POD=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+            -l app.kubernetes.io/name=portfolio \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ ! -z "$POD" ]; then
+            echo "Testing health endpoint on pod: $POD"
+            kubectl exec $POD -n ${{ env.NAMESPACE }} -- curl -s http://localhost:8080/health || echo "Health check pending..."
+          fi
 
       - name: Debug on Failure
         if: failure()
@@ -433,19 +533,16 @@ jobs:
           echo ""
           echo "=== Recent Events ==="
           kubectl get events -n ${{ env.NAMESPACE }} \
-            --sort-by='.lastTimestamp' | tail -30
+            --sort-by='.lastTimestamp' | tail -50
           
           echo ""
           echo "=== Deployment Description ==="
-          # Find actual deployment name dynamically
           DEPLOYMENT_NAME=$(kubectl get deployments -n ${{ env.NAMESPACE }} \
             -l app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }} \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
           
           if [ ! -z "$DEPLOYMENT_NAME" ]; then
             kubectl describe deployment $DEPLOYMENT_NAME -n ${{ env.NAMESPACE }} || true
-          else
-            echo "No deployment found with instance label ${{ env.HELM_RELEASE_NAME }}"
           fi
           
           echo ""
@@ -455,32 +552,31 @@ jobs:
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
           
           if [ ! -z "$POD_NAME" ]; then
-            echo "Logs from pod: $POD_NAME"
+            echo "Current logs from: $POD_NAME"
             kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} --tail=100 || true
             
             echo ""
-            echo "=== Previous Pod Logs (if crashed) ==="
-            kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} \
-              --previous --tail=100 2>/dev/null || echo "No previous logs available"
-          else
-            echo "No pods found"
+            echo "Previous logs (if crashed):"
+            kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} --previous --tail=100 2>/dev/null || echo "No previous logs"
           fi
+          
+          echo ""
+          echo "=== Ingress Controller Status ==="
+          kubectl get pods -n ingress-nginx
+          kubectl get svc -n ingress-nginx
           
           echo ""
           echo "=== Helm Release Status ==="
           helm status ${{ env.HELM_RELEASE_NAME }} -n ${{ env.NAMESPACE }} || true
-          
-          echo ""
-          echo "=== Helm Release History ==="
           helm history ${{ env.HELM_RELEASE_NAME }} -n ${{ env.NAMESPACE }} || true
 
 # =======================================================
-# JOB 7: Summary
+# JOB 8: Summary & Notifications
 # =======================================================
   notify:
     name: 📊 Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [code-quality, build-test, setup-backend, terraform-deploy, docker-build-push, deploy-to-aks]
+    needs: [code-quality, build-test, setup-backend, terraform-deploy, docker-build-push, setup-ingress-controller, deploy-to-aks]
     if: always()
 
     steps:
@@ -495,15 +591,26 @@ jobs:
           echo "| Backend Setup | ${{ needs.setup-backend.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Terraform | ${{ needs.terraform-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Docker | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ingress Setup | ${{ needs.setup-ingress-controller.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| AKS Deploy | ${{ needs.deploy-to-aks.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ needs.deploy-to-aks.result }}" == "success" ]; then
             echo "### ✅ Deployment Successful!" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Your application has been deployed to AKS." >> $GITHUB_STEP_SUMMARY
+            echo "Your application has been deployed to AKS with Ingress Controller." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Get your Ingress IP: \`kubectl get ingress -n production\`" >> $GITHUB_STEP_SUMMARY
+            echo "2. Configure your DNS to point to the Ingress IP" >> $GITHUB_STEP_SUMMARY
+            echo "3. Access your application at your configured domain" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ Pipeline Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Check the logs above for detailed error information." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Common Issues:**" >> $GITHUB_STEP_SUMMARY
+            echo "- Port mismatch (check containerPort matches nginx.conf)" >> $GITHUB_STEP_SUMMARY
+            echo "- Image pull errors (check ACR credentials)" >> $GITHUB_STEP_SUMMARY
+            echo "- Health probe failures (check /health endpoint)" >> $GITHUB_STEP_SUMMARY
           fi
