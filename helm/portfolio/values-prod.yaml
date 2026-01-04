@@ -1,7 +1,22 @@
 replicaCount: 3
 
+image:
+  tag: "1.0.0"  # Use specific version tags in production, not 'latest'
+  pullPolicy: Always
+
+service:
+  type: ClusterIP  # Use ClusterIP when using Ingress
+
 ingress:
+  enabled: true
+  className: "nginx"  # Specify your ingress controller
   host: portfolio.example.com
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  tls:
+    enabled: true
 
 hpa:
   enabled: true
