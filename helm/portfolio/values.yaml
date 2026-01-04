@@ -5,6 +5,9 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+# - name: acr-secret
+
 containerPort: 80
 
 service:
@@ -13,7 +16,14 @@ service:
 
 ingress:
   enabled: true
+  className: ""  # e.g., "nginx" or "traefik"
   host: portfolio.local
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    enabled: false
 
 hpa:
   enabled: true

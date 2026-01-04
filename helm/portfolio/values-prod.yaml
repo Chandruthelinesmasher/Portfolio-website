@@ -1,8 +1,11 @@
 replicaCount: 3
 
 image:
-  tag: "1.0.0"  # Use specific version tags in production, not 'latest'
+  tag: "1.0.0"  # This will be overridden by CI/CD
   pullPolicy: Always
+
+imagePullSecrets:
+  - name: acr-secret
 
 service:
   type: ClusterIP  # Use ClusterIP when using Ingress

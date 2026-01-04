@@ -19,6 +19,8 @@ env:
   TF_VAR_PROJECT_NAME: 'devops-portfolio'
   TF_VAR_ENVIRONMENT: 'prod'
   TF_VAR_LOCATION: 'eastus'
+  NAMESPACE: production
+  HELM_RELEASE_NAME: portfolio-prod
 
 # =======================================================
 # JOB 1: Code Quality & Security
@@ -258,7 +260,7 @@ jobs:
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
 # =======================================================
-# JOB 6: Deploy to AKS (Helm + HPA)
+# JOB 6: Deploy to AKS (Helm + HPA) - UPDATED
 # =======================================================
   deploy-to-aks:
     name: 🚀 Deploy to AKS (Helm)
@@ -283,23 +285,130 @@ jobs:
 
       - name: Create Production Namespace
         run: |
-          kubectl create namespace production \
+          kubectl create namespace ${{ env.NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create or Update ACR Secret
+        run: |
+          # Get ACR credentials
+          ACR_USERNAME=$(az acr credential show \
+            --name "${{ needs.terraform-deploy.outputs.acr_name }}" \
+            --query "username" -o tsv)
+          ACR_PASSWORD=$(az acr credential show \
+            --name "${{ needs.terraform-deploy.outputs.acr_name }}" \
+            --query "passwords[0].value" -o tsv)
+          
+          # Delete existing secret if it exists
+          kubectl delete secret acr-secret \
+            -n ${{ env.NAMESPACE }} \
+            --ignore-not-found=true
+          
+          # Create new secret
+          kubectl create secret docker-registry acr-secret \
+            --docker-server="${{ needs.terraform-deploy.outputs.acr_login_server }}" \
+            --docker-username="$ACR_USERNAME" \
+            --docker-password="$ACR_PASSWORD" \
+            -n ${{ env.NAMESPACE }}
 
       - name: Helm Deploy
         run: |
           IMAGE="${{ needs.docker-build-push.outputs.image-uri }}"
+          
+          echo "Deploying image: $IMAGE"
+          echo "Repository: ${IMAGE%:*}"
+          echo "Tag: ${IMAGE##*:}"
 
-          helm upgrade --install portfolio-prod ./helm/portfolio \
-            -n production \
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/portfolio \
+            -n ${{ env.NAMESPACE }} \
             -f helm/portfolio/values-prod.yaml \
-            --set image.repository=${IMAGE%:*} \
-            --set image.tag=${IMAGE##*:} \
+            --set image.repository="${IMAGE%:*}" \
+            --set image.tag="${IMAGE##*:}" \
             --wait \
-            --timeout 5m
+            --timeout 10m \
+            --debug
+
+      - name: Wait for Deployment Readiness
+        run: |
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-portfolio \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=5m
 
       - name: Verify Deployment
-        run: kubectl get deploy,svc,hpa -n production
+        run: |
+          echo "=== Deployment Status ==="
+          kubectl get deployments -n ${{ env.NAMESPACE }}
+          
+          echo ""
+          echo "=== Pods Status ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+          
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${{ env.NAMESPACE }}
+          
+          echo ""
+          echo "=== Ingress ==="
+          kubectl get ingress -n ${{ env.NAMESPACE }}
+          
+          echo ""
+          echo "=== HPA Status ==="
+          kubectl get hpa -n ${{ env.NAMESPACE }}
+
+      - name: Get Application URL
+        run: |
+          echo "=== 🎉 Application Deployed Successfully ==="
+          INGRESS_HOST=$(kubectl get ingress -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || echo "N/A")
+          echo "Application URL: https://${INGRESS_HOST}"
+          echo ""
+          echo "📊 Deployment Details:"
+          echo "  - Image: ${{ needs.docker-build-push.outputs.image-uri }}"
+          echo "  - Namespace: ${{ env.NAMESPACE }}"
+          echo "  - Release: ${{ env.HELM_RELEASE_NAME }}"
+
+      - name: Debug on Failure
+        if: failure()
+        run: |
+          echo "=== ❌ Deployment Failed - Debugging Information ==="
+          echo ""
+          echo "=== Pod Status ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+          
+          echo ""
+          echo "=== Recent Events ==="
+          kubectl get events -n ${{ env.NAMESPACE }} \
+            --sort-by='.lastTimestamp' | tail -30
+          
+          echo ""
+          echo "=== Deployment Description ==="
+          kubectl describe deployment ${{ env.HELM_RELEASE_NAME }}-portfolio \
+            -n ${{ env.NAMESPACE }} || true
+          
+          echo ""
+          echo "=== Pod Logs ==="
+          POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+            -l app.kubernetes.io/name=portfolio \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ ! -z "$POD_NAME" ]; then
+            echo "Logs from pod: $POD_NAME"
+            kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} --tail=100 || true
+            
+            echo ""
+            echo "=== Previous Pod Logs (if crashed) ==="
+            kubectl logs $POD_NAME -n ${{ env.NAMESPACE }} \
+              --previous --tail=100 2>/dev/null || echo "No previous logs available"
+          else
+            echo "No pods found"
+          fi
+          
+          echo ""
+          echo "=== Helm Release Status ==="
+          helm status ${{ env.HELM_RELEASE_NAME }} -n ${{ env.NAMESPACE }} || true
+          
+          echo ""
+          echo "=== Helm Release History ==="
+          helm history ${{ env.HELM_RELEASE_NAME }} -n ${{ env.NAMESPACE }} || true
 
 # =======================================================
 # JOB 7: Summary
@@ -311,8 +420,10 @@ jobs:
     if: always()
 
     steps:
-      - run: |
+      - name: Generate Summary
+        run: |
           echo "## 🚀 Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Code Quality | ${{ needs.code-quality.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -321,3 +432,14 @@ jobs:
           echo "| Terraform | ${{ needs.terraform-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Docker | ${{ needs.docker-build-push.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| AKS Deploy | ${{ needs.deploy-to-aks.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.deploy-to-aks.result }}" == "success" ]; then
+            echo "### ✅ Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Your application has been deployed to AKS." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Pipeline Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Check the logs above for detailed error information." >> $GITHUB_STEP_SUMMARY
+          fi
