@@ -8,11 +8,12 @@ image:
 imagePullSecrets: []
 # - name: acr-secret
 
-containerPort: 80
+containerPort: 8080  # Changed from 80 to 8080
 
 service:
   type: LoadBalancer
-  port: 80
+  port: 80  # External port stays 80
+  targetPort: 8080  # But routes to container port 8080
 
 ingress:
   enabled: true
