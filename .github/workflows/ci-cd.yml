@@ -175,13 +175,32 @@ jobs:
             -backend-config="resource_group_name=${{ env.BACKEND_RG }}" \
             -backend-config="storage_account_name=${{ needs.setup-backend.outputs.storage_account_name }}" \
             -backend-config="container_name=tfstate" \
-            -backend-config="key=infra.tfstate" \
-            -backend-config="use_azuread_auth=true"
+            -backend-config="key=infra.tfstate"
+        env:
+          ARM_CLIENT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
+
+      - name: Terraform Plan
+        run: |
+          cd terraform
+          terraform plan -input=false
+        env:
+          ARM_CLIENT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
 
       - name: Terraform Apply
         run: |
           cd terraform
           terraform apply -auto-approve -input=false
+        env:
+          ARM_CLIENT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
 
       - name: Extract Outputs
         id: tfout
@@ -191,6 +210,11 @@ jobs:
           echo "acr_login_server=$(terraform output -raw acr_login_server)" >> $GITHUB_OUTPUT
           echo "aks_name=$(terraform output -raw aks_cluster_name)" >> $GITHUB_OUTPUT
           echo "aks_rg=$(terraform output -raw aks_rg)" >> $GITHUB_OUTPUT
+        env:
+          ARM_CLIENT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+          ARM_CLIENT_SECRET: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+          ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          ARM_TENANT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
 
 # =======================================================
 # JOB 5: Docker Build & Push
