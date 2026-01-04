@@ -318,6 +318,7 @@ jobs:
           echo "Repository: ${IMAGE%:*}"
           echo "Tag: ${IMAGE##*:}"
 
+          # Start deployment in background so we can monitor
           helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/portfolio \
             -n ${{ env.NAMESPACE }} \
             -f helm/portfolio/values-prod.yaml \
@@ -325,11 +326,62 @@ jobs:
             --set image.tag="${IMAGE##*:}" \
             --wait \
             --timeout 10m \
-            --debug
+            --debug &
+          
+          HELM_PID=$!
+          
+          # Monitor deployment progress
+          sleep 30
+          for i in {1..20}; do
+            echo ""
+            echo "=== Deployment Check $i/20 ==="
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=portfolio
+            
+            POD_NAME=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=portfolio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ ! -z "$POD_NAME" ]; then
+              POD_STATUS=$(kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.phase}')
+              echo "Pod Status: $POD_STATUS"
+              
+              # Check for image pull issues
+              if kubectl get pod $POD_NAME -n ${{ env.NAMESPACE }} -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null | grep -q "ImagePullBackOff\|ErrImagePull"; then
+                echo "❌ IMAGE PULL ERROR DETECTED!"
+                kubectl describe pod $POD_NAME -n ${{ env.NAMESPACE }} | grep -A 10 "Events:"
+                kill $HELM_PID 2>/dev/null || true
+                exit 1
+              fi
+            fi
+            
+            # Check if helm finished
+            if ! kill -0 $HELM_PID 2>/dev/null; then
+              wait $HELM_PID
+              exit $?
+            fi
+            
+            sleep 15
+          done
+          
+          # Wait for helm to finish
+          wait $HELM_PID
 
       - name: Wait for Deployment Readiness
         run: |
-          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-portfolio \
+          echo "Looking for deployment..."
+          kubectl get deployments -n ${{ env.NAMESPACE }}
+          
+          # Find the actual deployment name
+          DEPLOYMENT_NAME=$(kubectl get deployments -n ${{ env.NAMESPACE }} \
+            -l app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }} \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ -z "$DEPLOYMENT_NAME" ]; then
+            echo "❌ No deployment found with label app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }}"
+            echo "Available deployments:"
+            kubectl get deployments -n ${{ env.NAMESPACE }} -o wide
+            exit 1
+          fi
+          
+          echo "Found deployment: $DEPLOYMENT_NAME"
+          kubectl rollout status deployment/$DEPLOYMENT_NAME \
             -n ${{ env.NAMESPACE }} \
             --timeout=5m
 
@@ -375,14 +427,26 @@ jobs:
           kubectl get pods -n ${{ env.NAMESPACE }} -o wide
           
           echo ""
+          echo "=== All Deployments ==="
+          kubectl get deployments -n ${{ env.NAMESPACE }}
+          
+          echo ""
           echo "=== Recent Events ==="
           kubectl get events -n ${{ env.NAMESPACE }} \
             --sort-by='.lastTimestamp' | tail -30
           
           echo ""
           echo "=== Deployment Description ==="
-          kubectl describe deployment ${{ env.HELM_RELEASE_NAME }}-portfolio \
-            -n ${{ env.NAMESPACE }} || true
+          # Find actual deployment name dynamically
+          DEPLOYMENT_NAME=$(kubectl get deployments -n ${{ env.NAMESPACE }} \
+            -l app.kubernetes.io/instance=${{ env.HELM_RELEASE_NAME }} \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          
+          if [ ! -z "$DEPLOYMENT_NAME" ]; then
+            kubectl describe deployment $DEPLOYMENT_NAME -n ${{ env.NAMESPACE }} || true
+          else
+            echo "No deployment found with instance label ${{ env.HELM_RELEASE_NAME }}"
+          fi
           
           echo ""
           echo "=== Pod Logs ==="
