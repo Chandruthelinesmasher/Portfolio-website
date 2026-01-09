@@ -1,4 +1,4 @@
-name: 🗑️ Destroy Azure Infrastructure
+name: Destroy Azure Infrastructure
 
 on:
   workflow_dispatch:
@@ -37,22 +37,22 @@ jobs:
 # Job 1: Validate Destroy Request
 # =======================================================
   validate-destroy:
-    name: ✅ Validate Destroy Request
+    name:  Validate Destroy Request
     runs-on: ubuntu-latest
 
     steps:
       - name: Validate confirmation
         run: |
           if [ "${{ github.event.inputs.confirmation }}" != "DESTROY" ]; then
-            echo "❌ Confirmation must be exactly 'DESTROY' (case-sensitive)"
+            echo "Confirmation must be exactly 'DESTROY' (case-sensitive)"
             echo "You entered: ${{ github.event.inputs.confirmation }}"
             exit 1
           fi
-          echo "✅ Confirmation validated"
+          echo "Confirmation validated"
 
       - name: Show destruction plan
         run: |
-          echo "# ⚠️ INFRASTRUCTURE DESTRUCTION PLAN" >> $GITHUB_STEP_SUMMARY
+          echo "#  INFRASTRUCTURE DESTRUCTION PLAN" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Resources to be destroyed:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -63,7 +63,7 @@ jobs:
           echo "- **Delete backend storage**: ${{ github.event.inputs.delete_backend }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Timestamp**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ⚠️ This will destroy:" >> $GITHUB_STEP_SUMMARY
+          echo "###  This will destroy:" >> $GITHUB_STEP_SUMMARY
           echo "- AKS Cluster" >> $GITHUB_STEP_SUMMARY
           echo "- Azure Container Registry" >> $GITHUB_STEP_SUMMARY
           echo "- All Kubernetes resources (pods, services, ingress)" >> $GITHUB_STEP_SUMMARY
@@ -77,7 +77,7 @@ jobs:
 # Job 2: Manual Approval
 # =======================================================
   approval:
-    name: 🛑 Manual Approval Required
+    name:  Manual Approval Required
     runs-on: ubuntu-latest
     needs: validate-destroy
     environment:
@@ -86,14 +86,14 @@ jobs:
     steps:
       - name: Approval granted
         run: |
-          echo "✅ Manual approval granted by ${{ github.actor }}"
+          echo " Manual approval granted by ${{ github.actor }}"
           echo "Proceeding with infrastructure destruction..."
 
 # =======================================================
 # Job 3: Backup Terraform State
 # =======================================================
   backup-state:
-    name: 💾 Backup Terraform State
+    name:  Backup Terraform State
     runs-on: ubuntu-latest
     needs: approval
 
@@ -111,19 +111,19 @@ jobs:
       - name: Find backend storage
         id: backend
         run: |
-          echo "🔍 Looking for Terraform backend storage..."
+          echo " Looking for Terraform backend storage..."
           
           BACKEND=$(az storage account list \
             --resource-group ${{ env.BACKEND_RG }} \
             --query "[?starts_with(name, 'tfstate')].name" -o tsv 2>/dev/null | head -n1 || echo "")
           
           if [ -z "$BACKEND" ]; then
-            echo "⚠️ No backend storage found"
+            echo " No backend storage found"
             echo "backend_exists=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          echo "✅ Found backend: $BACKEND"
+          echo " Found backend: $BACKEND"
           echo "backend_exists=true" >> $GITHUB_OUTPUT
           echo "backend_name=$BACKEND" >> $GITHUB_OUTPUT
 
@@ -140,7 +140,7 @@ jobs:
         run: |
           BACKUP_FILE="tfstate-backup-${{ github.event.inputs.environment }}-$(date +%Y%m%d-%H%M%S).tfstate"
           
-          echo "📦 Creating backup: $BACKUP_FILE"
+          echo " Creating backup: $BACKUP_FILE"
 
           # Download current state
           az storage blob download \
@@ -149,7 +149,7 @@ jobs:
             --name infra.tfstate \
             --file "$BACKUP_FILE" \
             --auth-mode login || {
-              echo "⚠️ No state file found to backup"
+              echo " No state file found to backup"
               exit 0
             }
 
@@ -162,9 +162,9 @@ jobs:
             --overwrite \
             --auth-mode login
 
-          echo "✅ State backed up successfully"
+          echo " State backed up successfully"
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 💾 Backup Created" >> $GITHUB_STEP_SUMMARY
+          echo "###  Backup Created" >> $GITHUB_STEP_SUMMARY
           echo "- **File**: \`$BACKUP_FILE\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Location**: \`${{ steps.backend.outputs.backend_name }}/tfstate-backups\`" >> $GITHUB_STEP_SUMMARY
 
@@ -172,7 +172,7 @@ jobs:
 # Job 4: Cleanup Kubernetes (Helm-first)
 # =======================================================
   cleanup-kubernetes:
-    name: 🧹 Cleanup Kubernetes Resources
+    name:  Cleanup Kubernetes Resources
     runs-on: ubuntu-latest
     needs: approval
     continue-on-error: true
@@ -198,8 +198,8 @@ jobs:
           
           echo "aks_name=$AKS_NAME" >> $GITHUB_OUTPUT
           echo "rg_name=$RG_NAME" >> $GITHUB_OUTPUT
-          echo "📋 AKS Name: $AKS_NAME"
-          echo "📋 Resource Group: $RG_NAME"
+          echo " AKS Name: $AKS_NAME"
+          echo " Resource Group: $RG_NAME"
 
       - name: Check if AKS exists
         id: aks-check
@@ -209,10 +209,10 @@ jobs:
             --resource-group "${{ steps.aks-info.outputs.rg_name }}" \
             &>/dev/null; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✅ AKS cluster found"
+            echo " AKS cluster found"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠️ AKS cluster not found (may already be deleted)"
+            echo " AKS cluster not found (may already be deleted)"
           fi
 
       - name: Get AKS credentials
@@ -229,16 +229,16 @@ jobs:
       - name: List all Helm releases
         if: steps.aks-check.outputs.exists == 'true'
         run: |
-          echo "📦 Current Helm releases:"
+          echo " Current Helm releases:"
           helm list --all-namespaces || true
 
       - name: Uninstall Helm releases
         if: steps.aks-check.outputs.exists == 'true'
         run: |
-          echo "🗑️ Uninstalling Helm releases..."
+          echo " Uninstalling Helm releases..."
           
           # Uninstall production release
-          helm uninstall portfolio-prod -n production --wait || echo "⚠️ Release not found or already deleted"
+          helm uninstall portfolio-prod -n production --wait || echo " Release not found or already deleted"
           
           # List and uninstall any other releases
           helm list --all-namespaces -q | while read release; do
@@ -250,26 +250,26 @@ jobs:
       - name: Delete production namespace
         if: steps.aks-check.outputs.exists == 'true'
         run: |
-          echo "🗑️ Deleting production namespace..."
+          echo " Deleting production namespace..."
           kubectl delete namespace production --wait=true --timeout=5m || true
 
       - name: Delete ingress controller
         if: steps.aks-check.outputs.exists == 'true'
         run: |
-          echo "🗑️ Deleting ingress controller..."
+          echo " Deleting ingress controller..."
           kubectl delete namespace ingress-nginx --wait=true --timeout=5m || true
 
       - name: List remaining resources
         if: steps.aks-check.outputs.exists == 'true'
         run: |
-          echo "📊 Remaining resources:"
+          echo " Remaining resources:"
           kubectl get all --all-namespaces || true
 
 # =======================================================
 # Job 5: Terraform Destroy
 # =======================================================
   terraform-destroy:
-    name: 💥 Terraform Destroy
+    name:  Terraform Destroy
     runs-on: ubuntu-latest
     needs: [approval, backup-state, cleanup-kubernetes]
 
@@ -289,9 +289,9 @@ jobs:
         run: |
           if [ -d "terraform" ]; then
             echo "TF_DIR=terraform" >> $GITHUB_ENV
-            echo "✅ Found Terraform directory"
+            echo " Found Terraform directory"
           else
-            echo "❌ Terraform directory not found"
+            echo " Terraform directory not found"
             exit 1
           fi
 
@@ -316,7 +316,7 @@ jobs:
         run: |
           cd $TF_DIR
           
-          echo "📋 Generating destroy plan..."
+          echo "Generating destroy plan..."
           terraform plan -destroy \
             -var="project_name=${{ env.TF_VAR_PROJECT_NAME }}" \
             -var="environment=${{ github.event.inputs.environment }}" \
@@ -332,12 +332,12 @@ jobs:
         run: |
           cd $TF_DIR
           
-          echo "💥 Executing destroy..."
+          echo " Executing destroy..."
           
           if [ "${{ needs.backup-state.outputs.backend_exists }}" == "true" ]; then
             terraform apply destroy.tfplan
           else
-            echo "⚠️ No backend found, attempting destroy without state..."
+            echo "No backend found, attempting destroy without state..."
             terraform destroy -auto-approve \
               -var="project_name=${{ env.TF_VAR_PROJECT_NAME }}" \
               -var="environment=${{ github.event.inputs.environment }}" \
@@ -354,17 +354,17 @@ jobs:
           RG_NAME="${{ env.TF_VAR_PROJECT_NAME }}-${{ github.event.inputs.environment }}-rg"
           
           if az group show --name "$RG_NAME" &>/dev/null; then
-            echo "⚠️ Resource group still exists, forcing deletion..."
+            echo "Resource group still exists, forcing deletion..."
             az group delete --name "$RG_NAME" --yes --no-wait
           else
-            echo "✅ Resource group successfully deleted"
+            echo "Resource group successfully deleted"
           fi
 
 # =======================================================
 # Job 6: Optional Backend Cleanup
 # =======================================================
   cleanup-backend:
-    name: 🧹 Cleanup Terraform Backend
+    name:  Cleanup Terraform Backend
     runs-on: ubuntu-latest
     needs: [terraform-destroy, backup-state]
     if: github.event.inputs.delete_backend == 'true'
@@ -376,7 +376,7 @@ jobs:
 
       - name: Final warning
         run: |
-          echo "⚠️⚠️⚠️ FINAL WARNING ⚠️⚠️⚠️"
+          echo " FINAL WARNING "
           echo "About to delete Terraform backend storage"
           echo "This will remove ALL state files and backups"
           echo "This action is IRREVERSIBLE"
@@ -384,20 +384,20 @@ jobs:
 
       - name: Delete backend resource group
         run: |
-          echo "🗑️ Deleting backend resource group: ${{ env.BACKEND_RG }}"
+          echo " Deleting backend resource group: ${{ env.BACKEND_RG }}"
           
           az group delete \
             --name ${{ env.BACKEND_RG }} \
             --yes \
             --no-wait
           
-          echo "✅ Backend deletion initiated"
+          echo " Backend deletion initiated"
 
 # =======================================================
 # Job 7: Final Verification & Summary
 # =======================================================
   verify-and-summary:
-    name: 📊 Verify & Summary
+    name:  Verify & Summary
     runs-on: ubuntu-latest
     needs: [validate-destroy, approval, backup-state, cleanup-kubernetes, terraform-destroy, cleanup-backend]
     if: always()
@@ -409,28 +409,28 @@ jobs:
 
       - name: Verify deletion
         run: |
-          echo "🔍 Verifying resource deletion..."
+          echo "Verifying resource deletion..."
           
           RG_NAME="${{ env.TF_VAR_PROJECT_NAME }}-${{ github.event.inputs.environment }}-rg"
           
           if az group show --name "$RG_NAME" &>/dev/null; then
-            echo "⚠️ Resource group still exists (deletion in progress)"
+            echo " Resource group still exists (deletion in progress)"
             az group show --name "$RG_NAME" --query "properties.provisioningState" -o tsv
           else
-            echo "✅ Resource group successfully deleted"
+            echo " Resource group successfully deleted"
           fi
           
           if [ "${{ github.event.inputs.delete_backend }}" == "true" ]; then
             if az group show --name "${{ env.BACKEND_RG }}" &>/dev/null; then
-              echo "⚠️ Backend resource group still exists (deletion in progress)"
+              echo " Backend resource group still exists (deletion in progress)"
             else
-              echo "✅ Backend resource group successfully deleted"
+              echo "Backend resource group successfully deleted"
             fi
           fi
 
       - name: Generate final summary
         run: |
-          echo "# 🗑️ Infrastructure Destruction Complete" >> $GITHUB_STEP_SUMMARY
+          echo "# Infrastructure Destruction Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "## Execution Details" >> $GITHUB_STEP_SUMMARY
@@ -451,7 +451,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           
           if [ "${{ needs.terraform-destroy.result }}" == "success" ]; then
-            echo "## ✅ Resources Destroyed" >> $GITHUB_STEP_SUMMARY
+            echo "## Resources Destroyed" >> $GITHUB_STEP_SUMMARY
             echo "- AKS Cluster" >> $GITHUB_STEP_SUMMARY
             echo "- Azure Container Registry" >> $GITHUB_STEP_SUMMARY
             echo "- All Kubernetes resources" >> $GITHUB_STEP_SUMMARY
@@ -462,14 +462,14 @@ jobs:
             fi
             
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 💾 State Backup" >> $GITHUB_STEP_SUMMARY
+            echo "###  State Backup" >> $GITHUB_STEP_SUMMARY
             if [ "${{ needs.backup-state.outputs.backend_exists }}" == "true" ]; then
               echo "State backup created in: \`${{ needs.backup-state.outputs.backend_name }}/tfstate-backups\`" >> $GITHUB_STEP_SUMMARY
             else
               echo "No state file found to backup" >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "## ❌ Destruction Failed" >> $GITHUB_STEP_SUMMARY
+            echo "##  Destruction Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Check the logs above for detailed error information." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
