@@ -1,4 +1,4 @@
-# 🌐 DevOps Portfolio Website
+#  DevOps Portfolio Website
 
 # Architecture
 
@@ -22,9 +22,9 @@ A modern, responsive **DevOps Engineer Portfolio Website** built using **React +
 <img width="1890" height="904" alt="image" src="https://github.com/user-attachments/assets/0682f1da-d2e9-488e-85a3-c47797968bd7" />
 
 
-# 🚀 DevOps Portfolio Website – Production-Ready Cloud Deployment
+# DevOps Portfolio Website – Production-Ready Cloud Deployment
 
-## 📌 Overview
+##  Overview
 
 This project demonstrates a **production-grade DevOps implementation** for deploying a portfolio website using **modern cloud-native DevOps practices**.
 
@@ -36,7 +36,7 @@ The goal of this project is to showcase **real-world DevOps skills**, not just t
 
 ---
 
-## 🧠 What This Project Demonstrates (Why It Matters)
+##  What This Project Demonstrates (Why It Matters)
 
 This project answers the following interviewer questions:
 
@@ -48,7 +48,7 @@ This project answers the following interviewer questions:
 
 ---
 
-## 🏗️ High-Level Architecture
+##  High-Level Architecture
 
 **Flow:**
 
@@ -72,7 +72,7 @@ Developer → GitHub
 
 ---
 
-## ⚙️ Technology Stack
+##  Technology Stack
 
 | Category               | Tools                            |
 | ---------------------- | -------------------------------- |
@@ -86,7 +86,7 @@ Developer → GitHub
 
 ---
 
-## 🔄 CI/CD Pipeline Design
+##  CI/CD Pipeline Design
 
 ### Pipeline Responsibilities:
 
@@ -105,7 +105,7 @@ Developer → GitHub
 
 ---
 
-## 📦 Docker Implementation
+##  Docker Implementation
 
 * Multi-stage Docker build to reduce image size
 * Non-root user execution for security
@@ -119,7 +119,7 @@ Developer → GitHub
 
 ---
 
-## ☸️ Kubernetes Deployment Strategy
+##  Kubernetes Deployment Strategy
 
 ### Kubernetes Resources Used:
 
@@ -137,7 +137,7 @@ Developer → GitHub
 
 ---
 
-## 🧱 Infrastructure as Code (Terraform)
+##  Infrastructure as Code (Terraform)
 
 Infrastructure is managed using **Terraform** to ensure:
 
@@ -154,7 +154,7 @@ Infrastructure is managed using **Terraform** to ensure:
 
 ---
 
-## 🛡️ Production Readiness Considerations
+##  Production Readiness Considerations
 
 ### Zero-Downtime Deployments
 
@@ -179,9 +179,9 @@ Infrastructure is managed using **Terraform** to ensure:
 
 ---
 
-## 🔥 Failure Scenarios & Debugging (Interview-Ready)
+##  Failure Scenarios & Debugging (Interview-Ready)
 
-### 1️⃣ Pod stuck in `Pending`
+### 1️ Pod stuck in `Pending`
 
 **Checks:**
 
@@ -189,7 +189,7 @@ Infrastructure is managed using **Terraform** to ensure:
 * Resource requests vs limits
 * Scheduler events
 
-### 2️⃣ `ImagePullBackOff`
+### 2️ `ImagePullBackOff`
 
 **Fix:**
 
@@ -197,7 +197,7 @@ Infrastructure is managed using **Terraform** to ensure:
 * Check container registry authentication
 * Confirm successful image push in CI/CD
 
-### 3️⃣ Application Crash (`CrashLoopBackOff`)
+### 3️ Application Crash (`CrashLoopBackOff`)
 
 **Debug:**
 
@@ -213,7 +213,7 @@ Infrastructure is managed using **Terraform** to ensure:
 * Fix root cause
 * Re-run pipeline or rollback deployment
 
-### 5️⃣ Terraform Apply Failure
+### 5️ Terraform Apply Failure
 
 **Handling:**
 
@@ -223,7 +223,7 @@ Infrastructure is managed using **Terraform** to ensure:
 
 ---
 
-## 📊 Monitoring & Observability (Basic)
+##  Monitoring & Observability (Basic)
 
 * Kubernetes Metrics Server
 * Pod and node-level resource usage
@@ -231,7 +231,7 @@ Infrastructure is managed using **Terraform** to ensure:
 
 ---
 
-## 🧪 Run Locally (Optional)
+##  Run Locally (Optional)
 
 ```bash
 docker build -t devops-portfolio .
@@ -240,7 +240,7 @@ docker run -p 8080:80 devops-portfolio
 
 ---
 
-## 📈 Why This Project is Interview-Ready
+##  Why This Project is Interview-Ready
 
 ✔ End-to-end CI/CD automation
 ✔ Infrastructure as Code (Terraform)
@@ -252,7 +252,7 @@ This project reflects **how DevOps works in real companies**, not just tutorials
 
 ---
 
-## 👨‍💻 About Me
+##  About Me
 
 **DevOps Engineer** with ~3.6 years of experience, specializing in:
 
@@ -262,7 +262,7 @@ This project reflects **how DevOps works in real companies**, not just tutorials
 * Cloud infrastructure (Azure & AWS basics)
 * Linux & production troubleshooting
 
-🎯 Actively targeting **₹12–15 LPA DevOps roles in Bangalore**.
+ Actively targeting **₹12–15 LPA DevOps roles in Bangalore**.
 
 ---
 
@@ -272,7 +272,7 @@ This project reflects **how DevOps works in real companies**, not just tutorials
 
 ---
 
-### 🔒 Planned Enhancements
+###  Planned Enhancements
 
 * Full monitoring stack (Prometheus + Grafana)
 * Advanced Terraform modules
